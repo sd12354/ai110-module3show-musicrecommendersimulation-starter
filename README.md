@@ -2,58 +2,75 @@
 
 ## Project Summary
 
-This is a small, content-based music recommender. It stores a catalog of
-songs and a user "taste profile" as plain data, scores every song against
-that profile with a simple rule I designed, and returns the highest
-scoring songs along with a short explanation of *why* each one was picked.
+This is a small **content-based** music recommender. It represents a catalog
+of songs and a user "taste profile" as structured data, scores every song
+against that profile with a linear weighted scoring function I designed, and
+returns the top-ranked songs together with a human-readable explanation of
+*why* each one was selected.
 
-My version, **VibeFinder 1.0**, works on a catalog of 22 songs spread
-across genres like pop, lofi, rock, hip hop, jazz, r&b, country and metal.
-It recommends songs by rewarding genre and mood matches and by favoring
-songs whose energy is close to what the user is in the mood for. Because
-every recommendation comes with its reasons, you can always see what the
-system was "thinking."
+My version, **VibeFinder 1.0**, runs on a catalog of 22 songs across genres
+like pop, lofi, rock, hip hop, jazz, r&b, country and metal. It ranks songs
+by rewarding genre and mood matches and by favoring songs whose energy is
+close to the user's target. Every recommendation ships with its scoring
+rationale, so the model is fully interpretable rather than a black box.
 
 ---
 
 ## How The System Works
 
-The whole idea is: **turn taste into numbers, then rank by the numbers.**
+Answering the prompt questions directly.
 
-**What each `Song` stores.** Every song has a genre, a mood, and four
-numeric "audio features" between 0 and 1: energy, valence (how positive it
-sounds), danceability, and acousticness, plus a tempo in BPM. My scoring
-rule uses genre, mood, energy, and acousticness.
+**What features does each `Song` use in your system?**
+Each `Song` carries two categorical features — `genre` and `mood` — and five
+numeric audio features: `energy`, `valence`, `danceability`, `acousticness`
+(all normalized to [0, 1]) and `tempo_bpm`. The scoring function consumes
+`genre`, `mood`, `energy`, and `acousticness`. `tempo_bpm`, `valence`, and
+`danceability` are carried in the schema but not yet weighted — deferred to
+future work (see below) because they need rescaling or overlap with existing
+signals.
 
-**What the `UserProfile` stores.** A user has a favorite genre, a favorite
-mood, a target energy level (0 = very calm, 1 = very intense), and a
-yes/no flag for whether they like acoustic music.
+**What information does your `UserProfile` store?**
+Four fields: `favorite_genre`, `favorite_mood`, `target_energy` (a scalar in
+[0, 1], 0 = calm → 1 = intense), and a boolean `likes_acoustic`. It is a
+deliberately low-dimensional representation of taste, which keeps the model
+easy to reason about and explain.
 
-**How a score is computed (my Algorithm Recipe).** For each song I add up
-points:
+**How does your `Recommender` compute a score for each song? (Algorithm Recipe)**
+The score is a weighted sum of four terms:
 
-- **+2.0** if the song's genre is the user's favorite genre.
-- **+1.0** if the song's mood is the user's favorite mood.
-- **up to +1.5** for energy *closeness*. I take the gap between the song's
-  energy and the user's target energy, and award `(1 - gap) × 1.5`. A
-  perfect energy match earns the full 1.5; the bonus shrinks as the gap
-  grows.
-- **+0.5** if the user likes acoustic music *and* the song is actually
-  acoustic (acousticness ≥ 0.6).
+- **+2.0** if `song.genre == user.favorite_genre` (exact categorical match).
+- **+1.0** if `song.mood == user.favorite_mood` (exact categorical match).
+- **up to +1.5** for energy proximity. Since both values are in [0, 1], the
+  absolute gap is also in [0, 1], so I award `(1 - gap) × 1.5` — a bounded
+  similarity term that peaks at an exact energy match and decays linearly.
+- **+0.5** if `likes_acoustic` is true **and** `acousticness ≥ 0.6`.
 
-Genre is weighted the most because it is the strongest signal of taste.
-Energy is a *similarity* score instead of an exact match, because "I want
-something around this energy" is more realistic than "I want exactly
-0.8."
+Genre carries the largest weight because it is the dominant signal of taste;
+mood is secondary; energy is modeled as a graded similarity rather than a
+hard equality because "around this energy" reflects real listening intent
+better than exact-match. The weights are hoisted into named module-level
+constants so they're a single point of control for experiments.
 
-**How songs are chosen.** I score every song, sort them from highest to
-lowest, and return the top `k` (default 5). Each recommendation carries
-the list of reasons it earned points, which becomes the "because…" line.
+**How do you choose which songs to recommend?**
+Score the full catalog, sort descending by score, return the top `k`
+(default 5). Ties fall back to stable sort order. Each result carries the
+list of reason strings that produced its score, which becomes the "because…"
+line — the model is self-explaining by construction.
 
-The same rule lives in one helper function and is shared by both the
-class-based `Recommender` (used by the tests) and the dictionary-based
-`recommend_songs` (used by the command line app), so the two can never
-disagree.
+The categorical/OOP path (`Recommender`, used by the tests) and the
+dict/functional path (`recommend_songs`, used by the CLI) both delegate to a
+single private `_score` helper, so the two interfaces are guaranteed
+consistent rather than two implementations that can drift apart.
+
+```
+UserProfile ─┐
+             ├──> _score() ──> (score, reasons) ──> sort desc ──> top k
+   Song    ─┘        │
+                     ├─ +2.0 genre match
+                     ├─ +1.0 mood match
+                     ├─ up to +1.5 energy proximity  (1 - |Δenergy|) × 1.5
+                     └─ +0.5 acoustic bonus (gated on user preference)
+```
 
 ---
 
@@ -90,15 +107,14 @@ pytest
 ```
 
 There are six tests in `tests/test_recommender.py`: the two starter tests
-plus four I added for the scoring rule, energy similarity, and CSV
-loading.
+plus four I added covering the scoring function, energy proximity, and CSV
+loading/type coercion.
 
 ---
 
 ## Sample Recommendation Output
 
-This is the real output of `python -m src.main` (trimmed to two of the
-three profiles):
+Real output of `python -m src.main` (trimmed to two of the three profiles):
 
 ```
 Loaded 22 songs from the catalog.
@@ -135,70 +151,81 @@ Profile: Chill Lofi
 ```
 
 The third profile, **Deep Intense Rock** (genre=rock, mood=intense,
-energy=0.95), correctly puts *Storm Runner* (rock/intense) at the top with
-a score of 4.44.
+energy=0.95), correctly ranks *Storm Runner* (rock/intense) first at 4.44.
 
 ---
 
 ## Experiments You Tried
 
-**1. Changing the genre weight from 2.0 to 0.5.**
-With genre weighted at 2.0, the High-Energy Pop user's top 5 is dominated
-by pop and indie-pop songs, and *Gym Hero* (a pop song, but with an
-*intense* mood) makes the list purely on its genre and energy. When I drop
-the genre weight to 0.5, *Gym Hero* falls out of the top 5 and *Open
-Highway* (a **country** song that is happy and mid-energy) climbs in. So
-the genre weight is basically a "how strict about genre" dial: high means
-"stay in my lane," low means "surprise me with other genres that still fit
-my mood and energy."
+**What happened when you changed the weight on genre from 2.0 to 0.5?**
+At `GENRE_WEIGHT = 2.0`, the High-Energy Pop user's top 5 is saturated with
+pop and indie-pop, and *Gym Hero* (pop, but `mood=intense`) still makes the
+cut on genre + energy alone. Dropping the weight to 0.5 shifts the ranking:
+*Gym Hero* drops out and *Open Highway* (a **country** track that is happy
+and mid-energy) moves in. Concretely, the genre term is a precision/recall
+knob — a high weight biases toward intra-genre precision ("stay in my lane"),
+a low weight increases cross-genre recall ("surface adjacent genres that
+still fit mood and energy"). This is the classic exploration/exploitation
+trade-off in miniature.
 
-**2. The acoustic bonus.**
-Turning on `likes_acoustic` for the Chill Lofi user pushes acoustic songs
-(*Library Rain*, *Midnight Coding*) above non-acoustic ones with otherwise
-similar scores. It is a small +0.5, so it acts as a tie-breaker rather
-than something that overrides genre or mood.
+**What happened when you added tempo or valence to the score?**
+I prototyped both and intentionally excluded them from the final recipe.
+`tempo_bpm` lives on a ~60–170 scale, so without feature scaling it would
+dominate the [0, 1] terms and effectively reduce the model to a tempo sort —
+it needs min-max normalization before it's usable. `valence` is strongly
+collinear with `mood`, so adding it mostly double-counted the mood signal
+rather than contributing independent information. Keeping the feature set to
+genre + mood + energy + acousticness preserved interpretability and avoided
+redundant terms, so I logged both as future work.
 
-**3. Very different users get very different lists.**
-Running all three profiles shows the recommender is actually responding to
-the profile and not just returning popular songs: the pop user, the lofi
-user, and the rock user share almost no songs in their top 5.
+**How did your system behave for different types of users?**
+Across the three profiles the top-5 lists are nearly disjoint, which
+confirms the model is conditioning on the profile rather than collapsing to a
+popularity prior. The `likes_acoustic` flag also measurably shifts ranking
+for the lofi user — enabling it promotes acoustic tracks above otherwise
+comparable non-acoustic ones. Because it contributes only +0.5, it functions
+as a tie-breaker and never overrides the genre or mood terms, which is the
+intended behavior.
 
 ---
 
 ## Limitations and Risks
 
-- **Tiny catalog.** With only 22 songs, there often are not many true
-  genre matches, so lower-ranked recommendations lean heavily on energy.
-- **Exact-match genre and mood.** "indie pop" and "pop" are treated as
-  completely different genres, even though a pop fan would probably enjoy
-  both. The system has no idea that some genres are neighbors.
-- **No understanding of the actual music.** It never hears a note or reads
-  a lyric; it only trusts the numbers in the CSV, which I made up.
-- **Popularity and novelty are ignored.** It cannot recommend something
-  genuinely new to you, and it has no sense of what is popular.
-- **Can over-favor one preference.** Because genre is worth the most
-  points, a user with a strong favorite genre can get a top 5 that is all
-  one genre, which is not very diverse.
+- **Small catalog / cold-start.** With only 22 songs there are few true genre
+  matches, so lower ranks lean disproportionately on the energy term.
+- **Exact-match categoricals.** "indie pop" and "pop" are distinct tokens, so
+  the model gets no notion of genre adjacency or similarity.
+- **No audio/NLP understanding.** It never processes waveforms or lyrics; it
+  trusts hand-authored feature values in the CSV.
+- **No popularity or novelty signal**, so it can't surface genuinely new
+  material or weight by what's trending.
+- **Popularity/overfitting bias.** Because genre is the heaviest term, a user
+  with a strong genre preference can receive a homogeneous top 5 — a
+  small-scale instance of the filter-bubble / feedback-loop problem.
 
-I go deeper on these in the model card.
+The model card expands on the bias analysis.
 
 ---
 
 ## Reflection
 
-Building this made the idea of a recommender feel a lot less magical and a
-lot more like bookkeeping. At its core, the system just assigns points and
-sorts — the "intelligence" is entirely in the scoring rule I chose, and
-every weight I picked is a value judgment about what matters more. Deciding
-that genre is worth 2.0 and mood only 1.0 is not a neutral fact about
-music; it is my opinion baked into math, and it visibly changes whose
-songs win.
+**What did you learn about how recommenders turn data into predictions?**
+The core realization is that a content-based recommender is, mechanically,
+just a scoring function plus a sort — the "intelligence" is entirely encoded
+in the weights, and every weight is a design decision rather than an
+objective fact. Setting genre to 2.0 and mood to 1.0 is a value judgment that
+directly determines which songs win, and I could watch the ranking change as
+I tuned it. Building the explanation strings alongside the score was the most
+valuable part: making the model self-explaining turned debugging into reading
+a sentence instead of reverse-engineering a number.
 
-That is also where I can see bias creeping into real systems. If my catalog
-had very few songs of a certain genre, that genre would almost never win,
-no matter how much a user liked it — the data shapes the output as much as
-the formula does. And because the model rewards "more of what you already
-like," it naturally narrows what people see over time instead of broadening
-it. Seeing that happen on 22 songs made it easy to imagine how a system
-trained on millions could quietly push everyone deeper into their own
-bubble.
+**What did you learn about where bias or unfairness could show up in systems like this?**
+Bias enters from two independent sources: the scoring function and the
+training/catalog distribution. An underrepresented genre essentially cannot
+win regardless of a user's stated preference, so a skewed dataset produces
+unfair outcomes even with a "correct" formula — data imbalance is as decisive
+as the model itself. And because the objective rewards similarity to existing
+preferences, repeated use induces a feedback loop that narrows exposure over
+time. Observing that dynamic on a 22-song toy catalog made it concrete how a
+production system trained on millions of interactions can systematically
+reinforce filter bubbles.
