@@ -1,4 +1,12 @@
-from src.recommender import Song, UserProfile, Recommender
+from src.recommender import (
+    Song,
+    UserProfile,
+    Recommender,
+    load_songs,
+    score_song,
+    recommend_songs,
+)
+
 
 def make_small_recommender() -> Recommender:
     songs = [
@@ -59,3 +67,57 @@ def test_explain_recommendation_returns_non_empty_string():
     explanation = rec.explain_recommendation(user, song)
     assert isinstance(explanation, str)
     assert explanation.strip() != ""
+
+
+# --- My own extra tests -----------------------------------------------------
+
+
+def test_score_song_gives_full_points_for_a_perfect_match():
+    """A song that matches genre, mood and energy exactly should earn the
+    genre bonus (+2) plus the mood bonus (+1) plus the full energy bonus
+    (+1.5) = 4.5, and list a reason for each."""
+    user_prefs = {"genre": "pop", "mood": "happy", "energy": 0.8}
+    song = {"genre": "pop", "mood": "happy", "energy": 0.8, "acousticness": 0.1}
+
+    score, reasons = score_song(user_prefs, song)
+
+    assert score == 4.5
+    assert len(reasons) == 3  # genre, mood, energy
+
+
+def test_score_song_rewards_closer_energy():
+    """Two songs that differ only in energy: the one closer to the user's
+    target energy should score higher."""
+    user_prefs = {"genre": "pop", "mood": "happy", "energy": 0.8}
+    close = {"genre": "rock", "mood": "sad", "energy": 0.8, "acousticness": 0.1}
+    far = {"genre": "rock", "mood": "sad", "energy": 0.2, "acousticness": 0.1}
+
+    close_score, _ = score_song(user_prefs, close)
+    far_score, _ = score_song(user_prefs, far)
+
+    assert close_score > far_score
+
+
+def test_load_songs_reads_catalog_and_converts_types():
+    """load_songs should read the real catalog and turn the numeric
+    columns into numbers rather than leaving them as strings."""
+    songs = load_songs("data/songs.csv")
+
+    assert len(songs) >= 10
+    first = songs[0]
+    assert isinstance(first["id"], int)
+    assert isinstance(first["energy"], float)
+    assert isinstance(first["genre"], str)
+
+
+def test_recommend_songs_respects_k():
+    """Asking for k recommendations should return exactly k items (when
+    the catalog is big enough), sorted from best to worst."""
+    songs = load_songs("data/songs.csv")
+    user_prefs = {"genre": "pop", "mood": "happy", "energy": 0.85}
+
+    results = recommend_songs(user_prefs, songs, k=3)
+
+    assert len(results) == 3
+    scores = [score for _, score, _ in results]
+    assert scores == sorted(scores, reverse=True)
